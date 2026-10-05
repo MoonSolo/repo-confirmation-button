@@ -21,6 +21,13 @@ it is not a UI button.
 The mod blocks exactly one transition — `Success`/`Surplus` → `Warning` — and only until the
 button is pressed.
 
+`Warning` is reached by two different routes, and the difference matters: a haul that lands exactly
+on the goal goes `Success → Warning`, while an over-target haul goes `Success → Surplus → Warning`.
+A confirmation therefore has to survive the `Surplus` step to be useful. Clearing it on any
+non-`Warning` transition eats it on `Surplus`, `Warning` is blocked again, and the mod reports
+"countdown starting" while nothing happens — so only the states that genuinely end the extraction
+(`Extracting`, `Complete`, `Cancel`, `Idle`, `TaxReturn`) drop it.
+
 ## The confirm button
 
 The button is **the shop's own button**, spawned onto the extraction point.
@@ -100,8 +107,7 @@ if (!isShop)
    | `Main Collider Left` | `(+2.080, 23.09, 0)` |
 
    The regular button at `z = +2.214` is the centre of the south border. The stand goes to the
-   south-west corner at `(2.08, 1.03, 2.03)` — configurable as `Placement/X`, `/Y`, `/Z`, so a
-   negated value moves it to another corner without a rebuild.
+   south-west corner at `(2.08, 1.03, 2.03)`, the `StandPosition` constant in `ConfirmGate.cs`.
 4. **Move the game's own button to the stand rather than replacing it.** The stand is purely a
    picture; the press is handled by the extraction point's own `buttonGrabObject`, which is relocated
    to the corner. A *cloned* grab object cannot do this job:
@@ -147,9 +153,9 @@ if (!isShop)
 | --- | --- |
 | `StateSet` (prefix) | Holds the `Warning` transition while unconfirmed, and drives the tube text. |
 | `OnClick` (prefix) | A press of the button confirms the extraction. |
-| `Start` (prefix) | Reports what the mod can see of this extraction point, and clones the shop stand **before** vanilla destroys it. |
+| `Start` (prefix) | Clones the shop stand **before** vanilla destroys it. |
 | `Update` (postfix) | Re-arms the button and watches for the press, once per frame. |
-| `ChatManager.Update` (postfix) | The heartbeat: re-scans the level every half second and writes down what it finds. |
+| `ChatManager.Update` (postfix) | The heartbeat: re-scans the level every half second and re-applies the hold. |
 | `SceneManager.sceneLoaded` | A plain C# event, not a GameObject — nothing a scene change can destroy. |
 
 None of the patches is load-bearing on its own: the heartbeat does the same work whatever the
@@ -195,6 +201,9 @@ means BepInEx silently skips one of them, and you end up debugging a version you
 
 ## Reading the log
 
+The mod logs at startup, and then only when something happens: a denied press, a confirmation, a
+host setting, or a failure. There is no per-frame or per-scan output.
+
 Startup:
 
 ```
@@ -202,87 +211,58 @@ Startup:
 [Info: ExtractionConfirm] Patched ExtractionPoint.StateSet, ExtractionPoint.OnClick, ExtractionPoint.Start, ExtractionPoint.Update, ChatManager.Update
 ```
 
-Then, immediately, the liveness probe. `BaseUnityPlugin` is a MonoBehaviour, so Unity calls its
-`Update` every frame for as long as the plugin object is alive — which makes this the one line that
-cannot be faked by anything downstream:
+If `Patched` is missing a hook, a warning names what was lost, e.g.
+`ExtractionPoint.OnClick not found - a press of the extraction point's own button may not register.`
+A patch that fails to attach costs speed, never function: the heartbeat re-scans the level every
+half second and does the same work regardless.
+
+Then, in play:
 
 ```
-[Info: ExtractionConfirm] Alive #1: frame 412, scene 'SplashScreen', plugin object active, patches=True
-[Info: ExtractionConfirm] Alive #30: frame 980, scene 'Level - Lobby Menu', plugin object active, patches=True
-```
-
-(loudly for the first 30 frames, then every 15 seconds). If the plugin object is ever torn down, the
-teardown is announced rather than swallowed:
-
-```
-[Error: ExtractionConfirm] Plugin object destroyed after 1183 updates - every patch and subscription this mod installed is now gone.
-```
-
-Then, every time a scene finishes loading — the line that settles whether the level ever loaded:
-
-```
-[Info: ExtractionConfirm] Scene loaded: 'Level - Wizard' - the mod is running inside it.
-```
-
-and a scan of what that scene contains, once per change rather than once per frame:
-
-```
-[Info: ExtractionConfirm] scene 'Level - Wizard': 1 extraction point(s) in the scene, 1 with a grabbable button, 0 holding, 1 started by the game
-```
-
-and once per extraction point, proving each hook in turn:
-
-```
-[Info: ExtractionConfirm] ExtractionPoint.Start reached - the mod is attached to a live extraction point.
-[Info: ExtractionConfirm] Confirm button ready at x, y, z: button mesh 'Button', grabbable=True, shop=False
-[Info: ExtractionConfirm] Tick: 'Extraction Point' is alive (state Idle), mod attached.
-```
-
-and the spawn itself:
-
-```
-[Info: ExtractionConfirm] Cached the shop stand as the confirm button template (head: True).
-[Info: ExtractionConfirm] Confirm button spawned: shop head at x, y, z, press target at x, y, z, mesh drawn=True, grabbable=True.
-```
-
-The spawn line reports the button head's **world** position, not the extraction point's, and whether
-a mesh is actually being drawn — the two things worth checking when it looks wrong. `mesh drawn=False`
-means the clone is invisible, which used to be the silent failure mode: the template is kept inactive
-and `Instantiate` copies `activeSelf`, so the clone has to be activated explicitly.
-
-If `No confirm button: this extraction point has no Shop Station and none was cached yet` appears and
-never clears, this level's extraction points have no shop station to clone from — and the fallback
-still applies: the regular button is simply re-armed instead of replaced.
-
-and when the target is reached:
-
-```
-[Info: ExtractionConfirm] Extraction held - press the confirm button to start the countdown
+[Info: ExtractionConfirm] Denied: haul 320 of 1000 required.
 [Info: ExtractionConfirm] Extraction confirmed - countdown starting
+```
+
+In multiplayer a guest's press is answered differently, and the host does the actual confirming:
+
+```
+[Info: ExtractionConfirm] Confirmation press - requested the countdown from the host
+[Info: ExtractionConfirm] Confirmation received from a player - countdown starting
+[Info: ExtractionConfirm] Using the host's validation setting: Auto
 ```
 
 How to read it:
 
 | What you see | What it means |
 | --- | --- |
-| **No `Alive #1` line at all** | The plugin MonoBehaviour never ticks. That is the BepInEx host, not the patches. |
-| **`Alive` lines stop, followed by `Plugin object destroyed`** | The plugin object is being torn down. That one event explains every silent symptom at once — the patches, the scene subscription and the static state all go with it. |
-| **`Alive` lines but no `Scene loaded`** | The plugin is alive but nothing downstream of it fires; the level scene is not finishing. |
-| **`Scene loaded` but `0 extraction point(s) in the scene`** | The scene is not the playable level. |
-| **Extraction points present but `0 started by the game`** | Their `Start` never ran. |
-| **`started by the game` counts up, `Confirm button ready` missing** | The Start prefix is not attached; the heartbeat is covering for it. |
+| **No `loaded` line at all** | The plugin was not loaded: wrong DLL location, or two copies of it in the tree. |
+| **`ExtractionPoint members missing`** | The game changed. `Resolve` names the members it could not find and nothing is patched. |
+| **Only `loaded`, never `Patched`** | Harmony refused to attach, or `ExtractionPoint` itself is gone. |
+| **`No confirm button: this extraction point has no Shop Station and none was cached yet`** | This level's extraction points carry no shop station to clone from. The regular button is simply re-armed instead of replaced, so the hold still works. |
+| **`The button did not move to the corner`** | `buttonDenyTransform` is no longer the button's parent, so the confirm stand and the press target are in different places. |
+| **`Patch error in <where>`** | A mod-side exception. Each distinct one is logged once, and every patch body fails open, so the extraction itself still behaves as vanilla. |
+| **`Denied: haul X of Y required`** | The button was pressed before the requirement was met. Set `Validation/Amount` to test without a full haul. |
 
 ## Configuration
 
 | Section | Key | Default | Meaning |
 | --- | --- | --- | --- |
-| General | `Enabled` | `true` | Hold the extraction before the countdown until the physical button is pressed. Set to `false` and restart to disable the mod entirely. |
-| Button | `Enabled` | `true` | Re-arm the button while the extraction is held and let that press confirm it. |
-| Visuals | `HoldText` | `CONFIRM` | Text shown on the extraction tube screen while waiting. |
-| Visuals | `ButtonHint` | `Confirm extraction` | Hover hint on the spawned button. |
-| Placement | `X` | `2.08` | Left/right of the spawned stand, in the extraction point's local frame. |
-| Placement | `Y` | `1.03` | Height of the spawned button. |
-| Placement | `Z` | `2.03` | Front/back of the spawned stand. `+z` is the south (front) border. |
+| Validation | `Auto` | `true` | `true` validates against the game's own haul goal. `false` uses `Amount`, so the hold is reachable without a full haul. **The host's setting always wins over a guest's.** |
+| Validation | `Amount` | `0` | Fixed validation target, 0–100000. **Changing this turns `Auto` off**, because a non-zero amount is the whole point of setting it. Leave it at `0` to keep using the game's target. |
+
+### Validating without a full haul
+
+Setting `Amount` to anything other than `0` turns `Auto` off automatically, which makes the confirm button usable immediately, so the grabbing zone
+and the whole flow can be tested without hauling anything.
+
+Pressing before the requirement is met answers the way the shop answers a purchase you cannot
+afford: the red deny flash, on the game's own button-deny animation, with the cancel sound. It says
+"not yet" and nothing more — vanilla still runs, because in REPO that button also opens the
+extraction area and a player may do that before reaching the goal.
+
+In multiplayer the setting is the host's alone. The host publishes it with Photon event `178` and
+clients read *that* instead of their own config — a guest validating at a different threshold than
+the host would be a rule nobody can see.
 
 The file lives at `BepInEx/config/com.repo.extractionconfirm.cfg`.
 
@@ -308,20 +288,21 @@ Output: `bin\Release\ExtractionConfirm.dll`. Override the game location with
 | [ExtractionConfirmMod.cs](ExtractionConfirmMod.cs) | Plugin entry point, configuration, and the Harmony patch declarations. |
 | [ConfirmGate.cs](ConfirmGate.cs) | The hold itself: blocking `StateSet(Warning)`, cloning and placing the shop stand, arming the button, confirmation handling and the multiplayer Photon event. |
 | [ConfirmButton.cs](ConfirmButton.cs) | The spawned button: glow, press squash on the game's own curve, and the press read from the button underneath. |
-| [ModRunner.cs](ModRunner.cs) | The heartbeat: a scene event and a throttled per-frame tick that discover extraction points and report what the level contains. |
-| plugin `Update` / `OnDestroy` | The liveness probe, and the one place a torn-down plugin object announces itself instead of going quiet. |
+| [ModRunner.cs](ModRunner.cs) | The heartbeat: a scene event and a throttled per-frame tick that discover extraction points and keep the hold applied. |
 
 ## Status
 
 Built and type-checked against the game's assemblies (`dotnet build -c Release`, 0 warnings, 0
-errors). The state-machine analysis and the button geometry come from decompiling the shipped
-`Assembly-CSharp` and dumping the prefabs out of `resources.assets`; an in-game smoke test (reach a
-target, confirm, extract — plus one multiplayer run) is still the final word.
+errors), and verified in game: reach the target, the extraction holds, the confirm button releases
+the countdown. The state-machine analysis and the button geometry come from decompiling the shipped
+`Assembly-CSharp` and dumping the prefabs out of `resources.assets`.
 
 Version history:
 
-- `1.0.0` — the confirm button is the extraction point's own button. Earlier builds cloned the
-  shop's purchase stand, which turned out to be the same button on a counter, so the clone added a
-  template cache, a placement problem and a PhotonView risk in exchange for nothing. This build
-  drops all of that, re-arms the button the game switches off, and adds a runner that reports what
-  the level contains so a silent log can never be ambiguous again.
+- `1.0.0` — the shop's purchase stand is cloned onto the extraction point and the game's own button
+  is moved onto it, so the stand's button is the one that extracts. The extraction is held before the
+  `Warning` countdown until that button is pressed, the button the game switches off is re-armed for
+  the whole hold, and a fixed validation amount makes the flow reachable without a full haul.
+  Everything that only existed to diagnose the build — the liveness probe, the per-scene scene
+  inventory, the per-hook "is alive" lines and the per-frame heartbeat logging — is gone; the only
+  remaining configuration is `Validation/Auto` and `Validation/Amount`.

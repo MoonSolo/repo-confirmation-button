@@ -3,26 +3,12 @@ using UnityEngine;
 
 namespace ExtractionConfirm
 {
-    /// <summary>
-    /// Drives the spawned confirm button: the shop's own button, moved onto the extraction point's
-    /// button position so it replaces the regular one visually.
-    ///
-    /// The press is NOT read from the spawned object. The clone carries a StaticGrabObject, whose
-    /// Start does `GetComponent<PhotonView>()` and then `photonView.TransferOwnership(...)` in
-    /// multiplayer - a null reference on a clone that was never registered with Photon. So the
-    /// clone's grab component is left disabled and the press is read from the extraction point's
-    /// own button, which is what physically sits underneath it.
-    ///
-    /// The squash and glow use the extraction point's own animation curve, which is the same curve
-    /// the game plays on its own buttons.
-    /// </summary>
     internal sealed class ConfirmButton : MonoBehaviour
     {
-        /// <summary>The squashing mesh inside the spawned button, by name.</summary>
         private const string VisualName = "Shop Button Visual";
 
-        /// <summary>Same orange the game uses for the "READY" tube screen text.</summary>
         private static readonly Color LitColor = new Color(1f, 0.5f, 0f);
+        private static readonly Color DenyColor = new Color(1f, 0f, 0f, 1f);
 
         private ExtractionPoint _extractionPoint;
         private StaticGrabObject _grabObject;
@@ -34,8 +20,8 @@ namespace ExtractionConfirm
         private bool _wasPressed;
         private float _animEval;
         private bool _animating;
+        private float _flashTimer;
 
-        /// <summary>Binds this button to the extraction point it confirms.</summary>
         public void Setup(ExtractionPoint extractionPoint, Transform head, StaticGrabObject grabObject, Action onPress)
         {
             _extractionPoint = extractionPoint;
@@ -51,14 +37,12 @@ namespace ExtractionConfirm
             MeshRenderer renderer = _visual.GetComponent<MeshRenderer>();
             if (renderer != null)
             {
-                // .material instantiates a private copy, so the shared shop material is untouched.
                 _material = renderer.material;
                 if (_material != null && _material.HasProperty("_EmissionColor"))
                     _material.SetColor("_EmissionColor", LitColor);
             }
         }
 
-        /// <summary>Finds a descendant by name, at any depth, inactive objects included.</summary>
         private static Transform FindDeep(Transform root, string name)
         {
             if (root == null)
@@ -78,14 +62,35 @@ namespace ExtractionConfirm
             if (_extractionPoint == null)
                 return;
 
-            // The spawned button's own grab object in singleplayer; the extraction point's own
-            // button in multiplayer, where the clone cannot be grabbed.
             bool pressed = ConfirmGate.IsLocallyGrabbed(_grabObject);
             if (pressed && !_wasPressed)
                 Press();
 
             _wasPressed = pressed;
             Animate();
+            TickFlash();
+        }
+
+        private void TickFlash()
+        {
+            if (_flashTimer <= 0f)
+                return;
+
+            _flashTimer -= Time.deltaTime;
+
+            if (_flashTimer > 0f)
+                return;
+
+            if (_material != null && _material.HasProperty("_EmissionColor"))
+                _material.SetColor("_EmissionColor", LitColor);
+        }
+
+        public void Flash()
+        {
+            _flashTimer = 0.7f;
+
+            if (_material != null && _material.HasProperty("_EmissionColor"))
+                _material.SetColor("_EmissionColor", DenyColor);
         }
 
         private void Press()
@@ -100,11 +105,9 @@ namespace ExtractionConfirm
             }
             catch
             {
-                // A missing sound must never cost the player the confirmation itself.
             }
         }
 
-        /// <summary>Same squash-and-glow the game plays on its own button, using the game's curve.</summary>
         private void Animate()
         {
             if (!_animating || _extractionPoint == null)
