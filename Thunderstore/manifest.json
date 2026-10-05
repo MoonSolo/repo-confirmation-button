@@ -1,0 +1,10 @@
+{
+  "name": "ExtractionConfirm",
+  "version_number": "1.0.0",
+  "website_url": "www.moonsolo.net/",
+  "description": "Confirm extraction manually, by pressing the button.",
+  "dependencies": [
+    "BepInEx-BepInExPack-5.4.2304"
+  ],
+  "FullName": "ExtractionConfirm"
+}
